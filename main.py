@@ -63,8 +63,9 @@ def init_db():
         quantity INTEGER
     )''')
     
-    # Users table
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
+    # Users table - DROP AND RECREATE to ensure it exists
+    c.execute('''DROP TABLE IF EXISTS users CASCADE''')
+    c.execute('''CREATE TABLE users (
         id SERIAL PRIMARY KEY,
         email TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
@@ -73,8 +74,9 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # Subscriptions table
-    c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (
+    # Subscriptions table - DROP AND RECREATE
+    c.execute('''DROP TABLE IF EXISTS subscriptions CASCADE''')
+    c.execute('''CREATE TABLE subscriptions (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id),
         plan TEXT NOT NULL,
@@ -84,8 +86,9 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # Payments table
-    c.execute('''CREATE TABLE IF NOT EXISTS payments (
+    # Payments table - DROP AND RECREATE
+    c.execute('''DROP TABLE IF EXISTS payments CASCADE''')
+    c.execute('''CREATE TABLE payments (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id),
         amount REAL NOT NULL,
@@ -327,7 +330,6 @@ def create_subscription(user_id: int, plan: str):
     conn = get_db_connection()
     c = conn.cursor()
     
-    # Check if user has active subscription
     c.execute("SELECT id FROM subscriptions WHERE user_id = %s AND status = 'active'", (user_id,))
     if c.fetchone():
         conn.close()
@@ -383,11 +385,9 @@ def verify_payment(reference_code: str, notes: Optional[str] = None):
     
     payment_id, user_id = row
     
-    # Update payment status
     c.execute("UPDATE payments SET status = 'verified', verified_at = CURRENT_TIMESTAMP, notes = %s WHERE id = %s",
               (notes, payment_id))
     
-    # Activate subscription
     c.execute("UPDATE subscriptions SET status = 'active', starts_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days' WHERE user_id = %s",
               (user_id,))
     
