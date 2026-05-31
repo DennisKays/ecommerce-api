@@ -6,6 +6,7 @@ import psycopg2
 import os
 import requests
 import uuid
+from passlib.context import CryptContext
 
 app = FastAPI(title="E-commerce API")
 
@@ -24,6 +25,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:yourpasswor
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://gecyngirlsbevbnsafch.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
@@ -31,6 +35,7 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
+    # Products table
     c.execute('''CREATE TABLE IF NOT EXISTS products (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
@@ -41,6 +46,7 @@ def init_db():
         stock INTEGER DEFAULT 10
     )''')
     
+    # Orders table
     c.execute('''CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
         customer_name TEXT,
@@ -49,6 +55,7 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
+    # Order items table
     c.execute('''CREATE TABLE IF NOT EXISTS order_items (
         id SERIAL PRIMARY KEY,
         order_id INTEGER,
@@ -56,6 +63,42 @@ def init_db():
         quantity INTEGER
     )''')
     
+    # Users table
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        full_name TEXT,
+        phone TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    # Subscriptions table
+    c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        plan TEXT NOT NULL,
+        status TEXT DEFAULT 'inactive',
+        starts_at TIMESTAMP,
+        expires_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    # Payments table
+    c.execute('''CREATE TABLE IF NOT EXISTS payments (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        amount REAL NOT NULL,
+        currency TEXT DEFAULT 'USD',
+        method TEXT,
+        reference_code TEXT UNIQUE NOT NULL,
+        status TEXT DEFAULT 'pending',
+        verified_at TIMESTAMP,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    # Seed sample data if empty
     c.execute("SELECT COUNT(*) FROM products")
     count = c.fetchone()[0]
     
@@ -96,6 +139,22 @@ class Order(BaseModel):
     items: List[OrderItem]
     total: float
 
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    full_name: str
+    phone: Optional[str] = None
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class PaymentCreate(BaseModel):
+    user_id: int
+    amount: float
+    method: str
+    reference_code: str
+
 def upload_to_supabase(file: UploadFile):
     """Upload file to Supabase Storage and return public URL"""
     if not SUPABASE_KEY:
@@ -104,10 +163,8 @@ def upload_to_supabase(file: UploadFile):
     file_extension = file.filename.split('.')[-1]
     file_name = f"{uuid.uuid4()}.{file_extension}"
     
-    # Read file content
     file_content = file.file.read()
     
-    # Upload to Supabase Storage
     upload_url = f"{SUPABASE_URL}/storage/v1/object/product-images/{file_name}"
     
     headers = {
@@ -120,7 +177,6 @@ def upload_to_supabase(file: UploadFile):
     if response.status_code not in [200, 201]:
         raise HTTPException(status_code=500, detail=f"Upload failed: {response.text}")
     
-    # Get public URL
     public_url = f"{SUPABASE_URL}/storage/v1/object/public/product-images/{file_name}"
     return public_url
 
@@ -215,6 +271,140 @@ def get_orders():
     orders = [dict(zip(columns, row)) for row in c.fetchall()]
     conn.close()
     return orders
+
+# AUTH ENDPOINTS
+@app.post("/auth/register")
+def register_user(user: UserCreate):
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    c.execute("SELECT id FROM users WHERE email = %s", (user.email,))
+    if c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    password_hash = pwd_context.hash(user.password)
+    
+    c.execute("INSERT INTO users (email, password_hash, full_name, phone) VALUES (%s, %s, %s, %s) RETURNING id",
+              (user.email, password_hash, user.full_name, user.phone))
+    user_id = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    
+    return {"message": "User registered", "user_id": user_id}
+
+@app.post("/auth/login")
+def login_user(credentials: UserLogin):
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    c.execute("SELECT id, password_hash FROM users WHERE email = %s", (credentials.email,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row or not pwd_context.verify(credentials.password, row[1]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    return {"message": "Login successful", "user_id": row[0]}
+
+@app.get("/auth/user/{user_id}")
+def get_user(user_id: int):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT id, email, full_name, phone, created_at FROM users WHERE id = %s", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    columns = [desc[0] for desc in c.description]
+    return dict(zip(columns, row))
+
+# SUBSCRIPTION ENDPOINTS
+@app.post("/subscriptions/create")
+def create_subscription(user_id: int, plan: str):
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Check if user has active subscription
+    c.execute("SELECT id FROM subscriptions WHERE user_id = %s AND status = 'active'", (user_id,))
+    if c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="User already has active subscription")
+    
+    c.execute("INSERT INTO subscriptions (user_id, plan, status) VALUES (%s, %s, %s) RETURNING id",
+              (user_id, plan, 'inactive'))
+    sub_id = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    
+    return {"message": "Subscription created", "subscription_id": sub_id}
+
+@app.get("/subscriptions/user/{user_id}")
+def get_user_subscription(user_id: int):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM subscriptions WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return {"status": "no_subscription"}
+    
+    columns = [desc[0] for desc in c.description]
+    return dict(zip(columns, row))
+
+# PAYMENT ENDPOINTS
+@app.post("/payments/create")
+def create_payment(payment: PaymentCreate):
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    c.execute("INSERT INTO payments (user_id, amount, method, reference_code) VALUES (%s, %s, %s, %s) RETURNING id",
+              (payment.user_id, payment.amount, payment.method, payment.reference_code))
+    payment_id = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    
+    return {"message": "Payment recorded", "payment_id": payment_id}
+
+@app.post("/payments/verify")
+def verify_payment(reference_code: str, notes: Optional[str] = None):
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    c.execute("SELECT id, user_id FROM payments WHERE reference_code = %s", (reference_code,))
+    row = c.fetchone()
+    
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Payment not found")
+    
+    payment_id, user_id = row
+    
+    # Update payment status
+    c.execute("UPDATE payments SET status = 'verified', verified_at = CURRENT_TIMESTAMP, notes = %s WHERE id = %s",
+              (notes, payment_id))
+    
+    # Activate subscription
+    c.execute("UPDATE subscriptions SET status = 'active', starts_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days' WHERE user_id = %s",
+              (user_id,))
+    
+    conn.commit()
+    conn.close()
+    
+    return {"message": "Payment verified and subscription activated"}
+
+@app.get("/payments/pending")
+def get_pending_payments():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT p.*, u.email, u.full_name FROM payments p JOIN users u ON p.user_id = u.id WHERE p.status = 'pending' ORDER BY p.created_at DESC")
+    columns = [desc[0] for desc in c.description]
+    payments = [dict(zip(columns, row)) for row in c.fetchall()]
+    conn.close()
+    return payments
 
 if __name__ == "__main__":
     import uvicorn
