@@ -1,10 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import psycopg2
 import os
-from urllib.parse import urlparse
+import requests
+import uuid
 
 app = FastAPI(title="E-commerce API")
 
@@ -16,8 +17,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database connection - uses environment variable or falls back to local
+# Database connection
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:yourpassword@localhost:5432/postgres")
+
+# Supabase configuration
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://gecyngirlsbevbnsafch.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -26,7 +31,6 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # Create products table
     c.execute('''CREATE TABLE IF NOT EXISTS products (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
@@ -37,7 +41,6 @@ def init_db():
         stock INTEGER DEFAULT 10
     )''')
     
-    # Create orders table
     c.execute('''CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
         customer_name TEXT,
@@ -46,7 +49,6 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # Create order items table
     c.execute('''CREATE TABLE IF NOT EXISTS order_items (
         id SERIAL PRIMARY KEY,
         order_id INTEGER,
@@ -54,7 +56,6 @@ def init_db():
         quantity INTEGER
     )''')
     
-    # Seed sample data if empty
     c.execute("SELECT COUNT(*) FROM products")
     count = c.fetchone()[0]
     
@@ -94,6 +95,43 @@ class Order(BaseModel):
     customer_email: str
     items: List[OrderItem]
     total: float
+
+def upload_to_supabase(file: UploadFile):
+    """Upload file to Supabase Storage and return public URL"""
+    if not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase key not configured")
+    
+    file_extension = file.filename.split('.')[-1]
+    file_name = f"{uuid.uuid4()}.{file_extension}"
+    
+    # Read file content
+    file_content = file.file.read()
+    
+    # Upload to Supabase Storage
+    upload_url = f"{SUPABASE_URL}/storage/v1/object/product-images/{file_name}"
+    
+    headers = {
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": file.content_type or "application/octet-stream"
+    }
+    
+    response = requests.post(upload_url, headers=headers, data=file_content)
+    
+    if response.status_code not in [200, 201]:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {response.text}")
+    
+    # Get public URL
+    public_url = f"{SUPABASE_URL}/storage/v1/object/public/product-images/{file_name}"
+    return public_url
+
+@app.post("/upload")
+async def upload_image(file: UploadFile = File(...)):
+    """Upload image and return URL"""
+    try:
+        image_url = upload_to_supabase(file)
+        return {"image_url": image_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/products")
 def get_products(category: Optional[str] = None):
