@@ -7,7 +7,6 @@ import os
 import requests
 import uuid
 from passlib.context import CryptContext
-from contextlib import asynccontextmanager
 
 # Database connection
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:yourpassword@localhost:5432/postgres")
@@ -110,12 +109,7 @@ def init_db():
     
     conn.close()
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    yield
-
-app = FastAPI(title="E-commerce API", lifespan=lifespan)
+app = FastAPI(title="E-commerce API")
 
 # CORS for frontend access
 app.add_middleware(
@@ -124,6 +118,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize database on first request
+@app.get("/init")
+def force_init():
+    try:
+        init_db()
+        return {"message": "Database initialized successfully"}
+    except Exception as e:
+        return {"error": str(e)}
 
 class Product(BaseModel):
     id: Optional[int] = None
