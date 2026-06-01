@@ -162,7 +162,6 @@ class PaymentCreate(BaseModel):
 
 def hash_password(password: str) -> str:
     """Hash password using bcrypt with 72-byte truncation"""
-    # bcrypt has 72 byte limit
     password_bytes = password.encode('utf-8')[:72]
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(password_bytes, salt)
@@ -401,16 +400,39 @@ def verify_payment(reference_code: str, notes: Optional[str] = None):
     
     payment_id, user_id = row
     
+    # Get user email for notification
+    c.execute("SELECT email, full_name FROM users WHERE id = %s", (user_id,))
+    user_row = c.fetchone()
+    user_email = user_row[0] if user_row else None
+    user_name = user_row[1] if user_row else "Customer"
+    
+    # Update payment status
     c.execute("UPDATE payments SET status = 'verified', verified_at = CURRENT_TIMESTAMP, notes = %s WHERE id = %s",
               (notes, payment_id))
     
+    # Activate subscription
     c.execute("UPDATE subscriptions SET status = 'active', starts_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days' WHERE user_id = %s",
               (user_id,))
     
     conn.commit()
     conn.close()
     
+    # Send email notification (optional - logs if no SMTP configured)
+    try:
+        send_verification_email(user_email, user_name, reference_code)
+    except:
+        pass  # Email is optional, don't fail if SMTP not configured
+    
     return {"message": "Payment verified and subscription activated"}
+
+def send_verification_email(to_email, user_name, reference_code):
+    """Send email notification - configure with your SMTP settings"""
+    if not to_email:
+        return
+    
+    # For now, just log it. Replace with real SMTP when ready.
+    print(f"EMAIL TO {to_email}: Hello {user_name}, your payment {reference_code} is verified!")
+    return True
 
 @app.get("/payments/pending")
 def get_pending_payments():
