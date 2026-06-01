@@ -291,7 +291,9 @@ def register_user(user: UserCreate):
         conn.close()
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    password_hash = pwd_context.hash(user.password)
+    # Truncate password to 72 bytes for bcrypt compatibility
+    password_bytes = user.password.encode('utf-8')[:72]
+    password_hash = pwd_context.hash(password_bytes)
     
     c.execute("INSERT INTO users (email, password_hash, full_name, phone) VALUES (%s, %s, %s, %s) RETURNING id",
               (user.email, password_hash, user.full_name, user.phone))
@@ -310,7 +312,12 @@ def login_user(credentials: UserLogin):
     row = c.fetchone()
     conn.close()
     
-    if not row or not pwd_context.verify(credentials.password, row[1]):
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Truncate password to 72 bytes for bcrypt compatibility
+    password_bytes = credentials.password.encode('utf-8')[:72]
+    if not pwd_context.verify(password_bytes, row[1]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     
     return {"message": "Login successful", "user_id": row[0]}
