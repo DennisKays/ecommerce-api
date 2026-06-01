@@ -7,16 +7,7 @@ import os
 import requests
 import uuid
 from passlib.context import CryptContext
-
-app = FastAPI(title="E-commerce API")
-
-# CORS for frontend access
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from contextlib import asynccontextmanager
 
 # Database connection
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:yourpassword@localhost:5432/postgres")
@@ -119,9 +110,20 @@ def init_db():
     
     conn.close()
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     init_db()
+    yield
+
+app = FastAPI(title="E-commerce API", lifespan=lifespan)
+
+# CORS for frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class Product(BaseModel):
     id: Optional[int] = None
