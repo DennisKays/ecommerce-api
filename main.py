@@ -6,7 +6,7 @@ import psycopg2
 import os
 import requests
 import uuid
-from passlib.context import CryptContext
+import bcrypt
 
 # Database connection
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:yourpassword@localhost:5432/postgres")
@@ -14,9 +14,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:yourpasswor
 # Supabase configuration
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://gecyngirlsbevbnsafch.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -163,6 +160,20 @@ class PaymentCreate(BaseModel):
     method: str
     reference_code: str
 
+def hash_password(password: str) -> str:
+    """Hash password using bcrypt with 72-byte truncation"""
+    # bcrypt has 72 byte limit
+    password_bytes = password.encode('utf-8')[:72]
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password_bytes, salt)
+    return hashed.decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify password against bcrypt hash"""
+    password_bytes = password.encode('utf-8')[:72]
+    hashed_bytes = hashed.encode('utf-8')
+    return bcrypt.checkpw(password_bytes, hashed_bytes)
+
 def upload_to_supabase(file: UploadFile):
     """Upload file to Supabase Storage and return public URL"""
     if not SUPABASE_KEY:
@@ -291,9 +302,7 @@ def register_user(user: UserCreate):
         conn.close()
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Truncate password to 72 bytes for bcrypt compatibility
-    password_bytes = user.password.encode('utf-8')[:72]
-    password_hash = pwd_context.hash(password_bytes)
+    password_hash = hash_password(user.password)
     
     c.execute("INSERT INTO users (email, password_hash, full_name, phone) VALUES (%s, %s, %s, %s) RETURNING id",
               (user.email, password_hash, user.full_name, user.phone))
@@ -312,12 +321,7 @@ def login_user(credentials: UserLogin):
     row = c.fetchone()
     conn.close()
     
-    if not row:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    # Truncate password to 72 bytes for bcrypt compatibility
-    password_bytes = credentials.password.encode('utf-8')[:72]
-    if not pwd_context.verify(password_bytes, row[1]):
+    if not row or not verify_password(credentials.password, row[1]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     
     return {"message": "Login successful", "user_id": row[0]}
